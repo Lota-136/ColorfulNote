@@ -1,4 +1,7 @@
 window.onload = async () => {
+    // ========================================
+    // アプリケーション初期化・フォント読み込み
+    // ========================================
     await document.fonts.load('25px "Cabin Sketch"');
 
     const app = new PIXI.Application();
@@ -10,8 +13,12 @@ window.onload = async () => {
     });
     document.body.appendChild(app.canvas);
 
+    // ========================================
+    // ゲームの設定値・定数 
+    // ========================================
     const imgStdNotes = await PIXI.Assets.load("assets/image/notes_std.png");
     const imgStdPencils = await PIXI.Assets.load("assets/image/pencils_std.png");
+    const imgParticles = await PIXI.Assets.load("assets/image/particles.png");
 
     const NOTE_W = 80;
     const NOTE_H = 25;
@@ -19,6 +26,7 @@ window.onload = async () => {
 
     const BASE_WIDTH = 1000;
     let baseHeight = 0;
+
     const gameContainer = new PIXI.Container();
     app.stage.addChild(gameContainer);
 
@@ -170,11 +178,78 @@ window.onload = async () => {
     accuracyText.anchor.set(1, 0);
     gameContainer.addChild(accuracyText);
 
+    // ***** 完成までに削除する *****
+    const textKari = new PIXI.Text({
+        text: "左：Dキー\n中央：F/Jキー\n右：Kキー\nクリックでゲームをスタート",
+        style: {
+            fontFamily: "monospace",
+            fontSize: 20,
+            fill: "#000000",
+            align: "left"
+        }
+    });
+    gameContainer.addChild(textKari);
+    // ***** 完成までに削除する *****
+
     let judgeLine = 0;
     let leftLaneX = 0;
     let centerLaneX = 0;
     let rightLaneX = 0;
 
+    const noteColors = {};
+
+    let particleTextures;
+
+    function initParticleTexture(app, imgParticles) {
+        for (const key in noteTextures){
+            const frame = noteTextures[key].frame;
+            const canvas = document.createElement("canvas");
+            canvas.width = frame.width;
+            canvas.height = frame.height;
+            const ctx = canvas.getContext("2d");
+
+            const sourceImage = noteTextures[key].source.resource;
+            ctx.drawImage(
+                sourceImage,
+                frame.x, frame.y, frame.width, frame.height,
+                0, 0, frame.width, frame.height
+            );
+
+            const pixel = ctx.getImageData(Math.floor(frame.width / 5), Math.floor(frame.height / 2), 1, 1).data;
+            noteColors[key] = (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
+        }
+
+        const rect = new PIXI.Graphics().rect(0, 0, 5, 7).fill(0xffffff);
+        const triangle = new PIXI.Graphics().poly([0, 9, 4, 0, 8, 5]).fill(0xffffff);
+        const chipRect = app.renderer.generateTexture(rect);
+        const chipTri = app.renderer.generateTexture(triangle);
+        rect.destroy();
+        triangle.destroy();
+
+        particleTextures = {
+            shaving: {
+                wood: [
+                    new PIXI.Texture({ source: imgParticles.source, frame: new PIXI.Rectangle(0, 0, 50, 50) }),
+                    new PIXI.Texture({ source: imgParticles.source, frame: new PIXI.Rectangle(50, 0, 50, 50) })
+                ],
+                core: [
+                    new PIXI.Texture({ source: imgParticles.source, frame: new PIXI.Rectangle(0, 50, 50, 50) }),
+                    new PIXI.Texture({ source: imgParticles.source, frame: new PIXI.Rectangle(50, 50, 50, 50) })
+                ]
+            },
+
+            chip: [
+                chipRect,
+                chipTri
+            ]
+        }
+    }
+
+    const particleContainer = new PIXI.Container();
+    gameContainer.addChild(particleContainer);
+    const activeParticles = [];
+
+    // 画面サイズに合わせてゲームのスケーリングを行う
     function SetupPosition() {
         let screenWidth = app.screen.width;
         let screenHeight = app.screen.height;
@@ -236,8 +311,16 @@ window.onload = async () => {
 
         accuracyText.x = BASE_WIDTH - 100;
         accuracyText.y = 100;
+
+        initParticleTexture(app, imgParticles);
+
+        // *****
+        textKari.x = 20;
+        textKari.y = 100;
+        // *****
     }
 
+    // 各ノーツに応じたX座標を渡す
     function getNotePosition(type) {
         if (type === 1) {
             return rightLaneX;
@@ -259,11 +342,13 @@ window.onload = async () => {
         SetupPosition();
     });
 
+    // ========================================
+    // SEの処理
+    // ========================================
     const audioCtx = new window.AudioContext();
     let audioBuffer = null;
     let audioStartTime = 0;
 
-    // SEを波形で保存する
     const seBuffers = {
         1: null,
         2: null,
@@ -272,8 +357,6 @@ window.onload = async () => {
 
     let isPlaying = false;
     let parsedNotes = [];
-    const scrollSpeed = 300;
-    const approachTime = 2.0;
 
     async function loadSE() {
         const sePaths = {
@@ -296,6 +379,12 @@ window.onload = async () => {
         source.connect(audioCtx.destination);
         source.start();
     }
+
+    // ========================================
+    // 譜面の処理
+    // ========================================
+    const scrollSpeed = 300;
+    const approachTime = 2.0;
 
     async function loadStage(jsonPath) {
         const response = await fetch(jsonPath);
@@ -345,6 +434,34 @@ window.onload = async () => {
         await loadSE();
     }
 
+    function spawnNote(type) {
+        let note;
+        if (notePool.length > 0) {
+            note = notePool.pop();
+        } else {
+            note = new PIXI.Sprite();
+        }
+        note.visible = true;
+        note.anchor.set(0.5);
+        note.texture = noteTextures[`type${type}`];
+        note.type = type;
+
+        if (type <= 3) {
+            note.width = LANE_W;
+        } else if (type <= 5) {
+            note.width = LANE_W * 2;
+        } else if (type === 6) {
+            note.width = LANE_W * 3;
+        }
+
+        gameContainer.addChild(note);
+        activeNotes.push(note);
+        return note;
+    }
+
+    // ========================================
+    // ゲームの処理
+    // ========================================
     async function startGame() {
         if (!audioBuffer) return;
 
@@ -412,6 +529,9 @@ window.onload = async () => {
         return 0;
     }
 
+    // ========================================
+    // 判定・スコア処理
+    // ========================================
     function judgeInput(type, pressedTime) {
         const currentTime = pressedTime - audioStartTime - JUDGE_OFFSET;
         let targetNote = null;
@@ -442,10 +562,12 @@ window.onload = async () => {
             judgement = "PERFECT";
             color = grdPerfect;
             perfectCount++;
+            createParticles(note.x, judgeLine, note.type, 4);
         } else if (diffMs <= JUDGE_WIDTH.GOOD) {
             judgement = "GOOD";
             color = grdGood;
             goodCount++;
+            createParticles(note.x, judgeLine, note.type, 2);
         } else if (diffMs <= JUDGE_WIDTH.MISS) {
             judgement = "MISS";
             color = grdMiss;
@@ -466,31 +588,21 @@ window.onload = async () => {
         judgeText.style.fill = color;
     }
 
-    function spawnNote(type) {
-        let note;
-        if (notePool.length > 0) {
-            note = notePool.pop();
-        } else {
-            note = new PIXI.Sprite();
-        }
-        note.visible = true;
-        note.anchor.set(0.5);
-        note.texture = noteTextures[`type${type}`];
-        note.type = type;
-
-        if (type <= 3) {
-            note.width = LANE_W;
-        } else if (type <= 5) {
-            note.width = LANE_W * 2;
-        } else if (type === 6) {
-            note.width = LANE_W * 3;
+    function updateAccuracy() {
+        if (totalNotesCount === 0) {
+            accuracyText.text = "0.00%";
+            return;
         }
 
-        gameContainer.addChild(note);
-        activeNotes.push(note);
-        return note;
+        const currentScore = (perfectCount * 1.0) + (goodCount * 0.75);
+        const accuracy = (currentScore / totalNotesCount) * 100;
+
+        accuracyText.text = `${accuracy.toFixed(2)}%`;
     }
 
+    // ========================================
+    // アニメーション・パーティクル処理
+    // ========================================
     function pencilAnimation(stages, mixIndex, isBlack) {
         for (let i = 0; i < stages.length; i++) {
             const pencil = pencils[stages[i] - 1];
@@ -506,18 +618,74 @@ window.onload = async () => {
         }
     }
 
-    function updateAccuracy() {
-        if (totalNotesCount === 0) {
-            accuracyText.text = "0.00%";
-            return;
+    function createParticles(x, y, noteType, count) {
+        const coreColor = noteColors[`type${noteType}`];
+
+        // 削りカス
+        for (let i = 0; i < count; i++) {
+            const shape = Math.floor(Math.random() * 2);
+            const particle = new PIXI.Container();
+
+            const woodSprite = new PIXI.Sprite(particleTextures.shaving.wood[shape]);
+            woodSprite.anchor.set(0.5);
+
+            const coreSprite = new PIXI.Sprite(particleTextures.shaving.core[shape]);
+            coreSprite.anchor.set(0.5);
+            coreSprite.tint = coreColor;
+
+            particle.addChild(woodSprite);
+            particle.addChild(coreSprite);
+
+            particle.x = x;
+            particle.y = y;
+
+            particle.rotation = Math.random() * Math.PI * 2;
+
+            const angle = Math.random() * Math.PI * 2;
+            const speed = 2;
+
+            particle.vx = Math.cos(angle) * speed;
+            particle.vy = Math.sin(angle) * speed;
+            particle.rotSpeed = (Math.random() - 0.5) * 0.1;
+            particle.alpha = 1.0;
+            particle.life = 0.8;
+            particle.decay = 0.02 + Math.random() * 0.015;
+
+            particleContainer.addChild(particle);
+            activeParticles.push(particle);
         }
 
-        const currentScore = (perfectCount * 1.0) + (goodCount * 0.5);
-        const accuracy = (currentScore / totalNotesCount) * 100;
+        // 小さい破片
+        for (let i = 0; i < count * 2; i++) {
+            const chipTexture = particleTextures.chip[Math.floor(Math.random() * 2)];
+            const particle = new PIXI.Sprite(chipTexture);
+            particle.anchor.set(0.5);
+            particle.tint = coreColor;
 
-        accuracyText.text = `${accuracy.toFixed(2)}%`;
+            particle.x = x;
+            particle.y = y;
+
+            particle.rotation = Math.random() * Math.PI * 2;
+
+            const angle = Math.random() * Math.PI * 2;
+            const speed = 2;
+
+            particle.vx = Math.cos(angle) * speed;
+            particle.vy = Math.sin(angle) * speed;
+            particle.rotSpeed = (Math.random() - 0.5) * 0.1;
+            particle.alpha = 1.0;
+            particle.life = 0.8;
+            particle.decay = 0.02 + Math.random() * 0.015;
+
+            particleContainer.addChild(particle);
+            activeParticles.push(particle);
+        }
+
     }
 
+    // ========================================
+    // メインループ
+    // ========================================
     app.ticker.add(() => {
         if (!isPlaying) return;
 
@@ -552,7 +720,7 @@ window.onload = async () => {
             }
 
             if (judgeText.alpha > 0) {
-                judgeText.alpha -= 0.02;
+                judgeText.alpha -= 0.01;
                 if (judgeText.alpha < 0) {
                     judgeText.alpha = 0;
                 }
@@ -570,6 +738,26 @@ window.onload = async () => {
             }
             pencil.y = pencil.baseY + pencil.offsetY;
             
+        }
+
+        for (let i = activeParticles.length - 1; i >= 0; i--) {
+            const p = activeParticles[i];
+
+            p.x += p.vx;
+            p.y += p.vy;
+            p.rotation += p.rotSpeed;
+            p.life -= p.decay;
+            if (p.life > 0.3) {
+                p.alpha = 1;
+            } else {
+                p.alpha = Math.max(0, p.life / 0.3);
+            }
+
+            if (p.life <= 0) {
+                particleContainer.removeChild(p);
+                p.destroy({ children: true });
+                activeParticles.splice(i, 1);
+            }
         }
     });
 
