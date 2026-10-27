@@ -11,15 +11,23 @@ window.onload = async () => {
         backgroundColor: 0xeeeeee,
         resizeTo: window
     });
-    document.body.appendChild(app.canvas);
+    
+    const gameScreen = document.getElementById("game-screen");
+    gameScreen.appendChild(app.canvas);
 
     // ========================================
     // ゲームの設定値・定数 
     // ========================================
+
+    // --- 画像データ読み込み ---
     const imgStdNotes = await PIXI.Assets.load("assets/image/notes_std.png");
     const imgStdPencils = await PIXI.Assets.load("assets/image/pencils_std.png");
     const imgParticles = await PIXI.Assets.load("assets/image/particles.png");
 
+    imgStdPencils.source.scaleMode = "nearest";
+    imgStdNotes.source.scaleMode = "nearest";
+
+    // --- ノーツと縮尺の基本設定
     const NOTE_W = 80;
     const NOTE_H = 25;
     const LANE_W = 80;
@@ -30,55 +38,52 @@ window.onload = async () => {
     const gameContainer = new PIXI.Container();
     app.stage.addChild(gameContainer);
 
+    // --- 入力・判定 ---
     let pressedStages = {};
     let inputDelayTimer = null;
-    const INPUT_DELAY_MS = 40;
-
+    const INPUT_DELAY_MS = 50;  // これ以下の間隔で押されたキーは同時押し
     const JUDGE_OFFSET = 0.000;
-
-    let inputTimestamp = 0;
-
+    
     const JUDGE_WIDTH = {
         PERFECT: 50,
         GOOD: 100,
         MISS: 150
     }
 
-    const KEY_MAP = {
-        "KeyD": 3, "KeyF": 2, "KeyJ": 2, "KeyK": 1
-    }
+    let currentKeyMap = {};
 
+    // --- ノーツのテクスチャ ---
     const NOTE_TEXTURE_X = 100;
     const NOTE_TEXTURE_Y = 25;
-
     const noteTextures = {
-        type1: getNoteTexture(0, 0),
-        type2: getNoteTexture(0, 1),
-        type3: getNoteTexture(0, 2),
-        type4: getNoteTexture(1, 0),
-        type5: getNoteTexture(1, 1),
-        type6: getNoteTexture(1, 2)
+        type1: getNoteTexture(0, 0, 1),
+        type2: getNoteTexture(0, 1, 1),
+        type3: getNoteTexture(0, 2, 1),
+        type4: getNoteTexture(1, 0, 2),
+        type5: getNoteTexture(1, 1, 2),
+        type6: getNoteTexture(1, 2, 2),
+        type4_3: getNoteTexture(3, 0, 3),
+        type5_3: getNoteTexture(3, 1, 3),
+        type6_3: getNoteTexture(3, 2, 3)
     }
 
-    function getNoteTexture(col, row) {
-        let rect;
-        if (col === 0) {
-            rect = new PIXI.Rectangle(col * NOTE_TEXTURE_X, row * NOTE_TEXTURE_Y, NOTE_TEXTURE_X, NOTE_TEXTURE_Y);
-        } else if (row === 0 || row === 1) {
-            rect = new PIXI.Rectangle(col * NOTE_TEXTURE_X, row * NOTE_TEXTURE_Y, NOTE_TEXTURE_X * 2, NOTE_TEXTURE_Y);
-        } else {
-            rect = new PIXI.Rectangle(col * NOTE_TEXTURE_X, row * NOTE_TEXTURE_Y, NOTE_TEXTURE_X * 3, NOTE_TEXTURE_Y);
-        }
-        
+    function getNoteTexture(col, row, lane) {
+        const rect = new PIXI.Rectangle(
+            col * NOTE_TEXTURE_X,
+            row * NOTE_TEXTURE_Y,
+            NOTE_TEXTURE_X * lane,
+            NOTE_TEXTURE_Y
+        );
+
         return new PIXI.Texture({
             source: imgStdNotes.source,
             frame: rect
         });
     }
 
+    // --- 鉛筆のテクスチャ ---
     const PENCIL_TEXTURE_X = 100;
     const PENCIL_TEXTURE_Y = 100;
-
     const pencilTextures = {
         normal: [getPencilTexture(0, 0), getPencilTexture(1, 0), getPencilTexture(2, 0)],
         mix: [getPencilTexture(0, 1), getPencilTexture(1, 1), getPencilTexture(2, 1)],
@@ -90,26 +95,52 @@ window.onload = async () => {
         return new PIXI.Texture({
             source: imgStdPencils.source,
             frame: rect
-        }); 
+        });
     }
+
+    // --- 画面のオブジェクト ---
+    let currentDiff;
+    let laneCount = 3;
+    let laneXList = [];
+
+    let inputTimestamp = 0;  
 
     const lane = new PIXI.Graphics();
     gameContainer.addChild(lane);
 
+    let laneColors = [];
+    let mixLaneColors = [];
+    let currentLaneColors = [];
+
     const judgeFrame = new PIXI.Graphics();
     gameContainer.addChild(judgeFrame);
+
+    let frameColors = [];
 
     const judgeText = new PIXI.Text({
         text: "",
         style: {
             fontFamily: "Cabin Sketch",
             fontSize: 25,
-            fill: 0xffffff,
+            fill: "#ffffff",
             align: "center"
         }
     });
     judgeText.anchor.set(0.5);
     gameContainer.addChild(judgeText);
+
+    let isShowDiff = false;
+    const diffText = new PIXI.Text({
+        text: "",
+        style: {
+            fontFamily: "Cabin Sketch",
+            fontSize: 20,
+            fill: "#ffffff",
+            align: "center"
+        }
+    });
+    diffText.anchor.set(0.5);
+    gameContainer.addChild(diffText);
 
     const grdPerfect = new PIXI.FillGradient({
         type: "linear",
@@ -178,9 +209,9 @@ window.onload = async () => {
     accuracyText.anchor.set(1, 0);
     gameContainer.addChild(accuracyText);
 
-    // ***** 完成までに削除する *****
+    // ***** 完成までに削除する *********************************************
     const textKari = new PIXI.Text({
-        text: "左：Dキー\n中央：F/Jキー\n右：Kキー\nクリックでゲームをスタート",
+        text: "",
         style: {
             fontFamily: "monospace",
             fontSize: 20,
@@ -189,19 +220,24 @@ window.onload = async () => {
         }
     });
     gameContainer.addChild(textKari);
-    // ***** 完成までに削除する *****
+    // ***** 完成までに削除する *********************************************
 
     let judgeLine = 0;
-    let leftLaneX = 0;
-    let centerLaneX = 0;
-    let rightLaneX = 0;
 
     const noteColors = {};
 
     let particleTextures;
 
+    const particleContainer = new PIXI.Container();
+    gameContainer.addChild(particleContainer);
+
+    const activeParticles = [];
+
+    // ========================================
+    // 描画・座標計算関数
+    // ========================================
     function initParticleTexture(app, imgParticles) {
-        for (const key in noteTextures){
+        for (const key in noteTextures) {
             const frame = noteTextures[key].frame;
             const canvas = document.createElement("canvas");
             canvas.width = frame.width;
@@ -245,9 +281,43 @@ window.onload = async () => {
         }
     }
 
-    const particleContainer = new PIXI.Container();
-    gameContainer.addChild(particleContainer);
-    const activeParticles = [];
+    function drawLaneColors() {
+        lane.clear();
+
+        const totalLaneWidth = LANE_W * laneCount;
+        const startX = BASE_WIDTH / 2 - totalLaneWidth / 2;
+
+        for (let i = 0; i < laneCount; i++) {
+            const x = startX + LANE_W * i;
+            const color = currentLaneColors[i];
+
+            lane.rect(
+                x,
+                0,
+                LANE_W,
+                baseHeight
+            ).fill(color);
+
+            lane.rect(
+                x,
+                0,
+                LANE_W,
+                baseHeight
+            ).fill({
+                color: 0x111111,
+                alpha: 0.8
+            });
+
+            for (let i = 1; i < laneCount; i++) {
+                lane.moveTo(startX + LANE_W * i, 0)
+                    .lineTo(startX + LANE_W * i, baseHeight)
+                    .stroke({
+                        color: 0x666666,
+                        width: 2
+                    });
+            }
+        }
+    }
 
     // 画面サイズに合わせてゲームのスケーリングを行う
     function SetupPosition() {
@@ -259,50 +329,57 @@ window.onload = async () => {
 
         baseHeight = screenHeight / scalelate;
 
+        const totalLaneWidth = LANE_W * laneCount;
+
         // レーン全体の左端
-        const startX = BASE_WIDTH / 2 - LANE_W * 1.5;
+        const startX = BASE_WIDTH / 2 - totalLaneWidth / 2;
 
-        leftLaneX = startX + LANE_W / 2;
-        centerLaneX = startX + LANE_W + LANE_W / 2;
-        rightLaneX = startX + LANE_W + LANE_W + LANE_W / 2;
+        laneXList = [];
+        for (let i = 0; i < laneCount; i++) {
+            laneXList.push(startX + LANE_W * i + LANE_W / 2)
+        }
 
-        lane.clear()
-            .rect(startX, 0, LANE_W, baseHeight)
-            .rect(startX + LANE_W, 0, LANE_W, baseHeight)
-            .rect(startX + LANE_W + LANE_W, 0, LANE_W, baseHeight)
-            .fill(0x333333)
-            .moveTo(startX + LANE_W, 0)
-            .lineTo(startX + LANE_W, baseHeight)
-            .moveTo(startX + LANE_W * 2, 0)
-            .lineTo(startX + LANE_W * 2, baseHeight)
-            .stroke({
-                color: 0x666666,
-                width: 2
-            });
+        drawLaneColors();
+
         judgeLine = baseHeight - 80;
 
-        judgeFrame.clear()
-            .rect(startX, judgeLine - NOTE_H / 2, NOTE_W, NOTE_H)
-            .rect(startX + LANE_W, judgeLine - NOTE_H / 2, NOTE_W, NOTE_H)
-            .rect(startX + LANE_W + LANE_W, judgeLine - NOTE_H / 2, NOTE_W, NOTE_H)
-            .stroke({
-                color: 0xffffff,
-                width: 3
+        judgeFrame.clear();
+        for (let i = 0; i < laneCount; i++) {
+            judgeFrame.rect(
+                startX + LANE_W * i,
+                judgeLine - NOTE_H / 2,
+                NOTE_W,
+                NOTE_H
+            ).stroke({
+                color: frameColors[i],
+                width: 2
             });
+        }
 
         judgeText.x = BASE_WIDTH / 2;
         judgeText.y = judgeLine - 50;
 
+        diffText.x = BASE_WIDTH / 2;
+        diffText.y = judgeLine - 25;
+
         const pencilStartY = judgeLine + 30;
-
-        pencils[0].x = rightLaneX;
-        pencils[1].x = centerLaneX;
-        pencils[2].x = leftLaneX;
-
         for (let i = 0; i < pencils.length; i++) {
-            const pencil = pencils[i];
-            pencil.baseY = pencilStartY;
-            pencil.y = pencil.baseY + pencil.offsetY;
+            if (i < laneCount) {
+                pencils[i].visible = true;
+                pencils[i].x = laneXList[i];
+                pencils[i].baseY = pencilStartY;
+                pencils[i].y = pencils[i].baseY + pencils[i].offsetY;
+
+                // レーンに応じた色の初期化
+                if (laneCount === 2) {
+                    pencils[i].defaultColorIndex = (i === 0) ? 2 : 1;
+                } else {
+                    pencils[i].defaultColorIndex = (i === 0) ? 2 : (i === 1) ? 1 : 0;
+                }
+                pencils[i].texture = pencilTextures.normal[pencils[i].defaultColorIndex];
+            } else {
+                pencils[i].visible = false;
+            }
         }
 
         for (let note of activeNotes) {
@@ -312,8 +389,6 @@ window.onload = async () => {
         accuracyText.x = BASE_WIDTH - 100;
         accuracyText.y = 100;
 
-        initParticleTexture(app, imgParticles);
-
         // *****
         textKari.x = 20;
         textKari.y = 100;
@@ -322,20 +397,45 @@ window.onload = async () => {
 
     // 各ノーツに応じたX座標を渡す
     function getNotePosition(type) {
-        if (type === 1) {
-            return rightLaneX;
-        } else if (type === 2) {
-            return centerLaneX;
-        } else if (type === 3) {
-            return leftLaneX;
-        } else if (type === 4) {
-            return centerLaneX + NOTE_W / 2;
-        } else if (type === 5) {
-            return leftLaneX + NOTE_W / 2;
-        } else if (type === 6) {
-            return centerLaneX;
+        if (laneCount === 2) {
+            if (type === 2) {
+                return laneXList[1];
+            } else if (type === 3) {
+                return laneXList[0];
+            } else if (type === 5) {
+                return (laneXList[0] + laneXList[1]) / 2;
+            }
+        } else {
+            if (type === 1) {
+                return laneXList[2];
+            } else if (type === 2) {
+                return laneXList[1];
+            } else if (type === 3) {
+                return laneXList[0];
+            } else if (type >= 4 && type <= 6) {
+                return laneXList[1];
+            }
         }
+        return laneXList[0];
     }
+
+    initParticleTexture(app, imgParticles);
+
+    laneColors = [
+        noteColors.type3,
+        noteColors.type2,
+        noteColors.type1
+    ];
+
+    frameColors = [...laneColors];
+
+    mixLaneColors = [
+        noteColors.type4,
+        noteColors.type5,
+        noteColors.type6
+    ]
+
+    currentLaneColors = [...laneColors];
 
     SetupPosition();
     window.addEventListener("resize", () => {
@@ -386,19 +486,40 @@ window.onload = async () => {
     const scrollSpeed = 300;
     const approachTime = 2.0;
 
-    async function loadStage(jsonPath) {
+    async function loadStage(jsonPath, diffKey) {
+        // リセット
+        parsedNotes = [];
+        activeNotes.length = 0;
+        notePool.length = 0;
+        totalNotesCount = 0;
+        perfectCount = 0;
+        goodCount = 0;
+        missCount = 0;
+
+        currentDiff = diffKey;
+        if (currentDiff === "easy") {
+            laneCount = 2;
+        } else {
+            laneCount = 3;
+        }
+
+        currentLaneColors = [...laneColors];
+        SetupPosition();
+        updateKeyMap();
+
         const response = await fetch(jsonPath);
         const chartData = await response.json();
+        const selectedChart = chartData.charts[diffKey];
         const audioRes = await fetch(chartData.audioPath);
         const arrayBuffer = await audioRes.arrayBuffer();
         audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
         let currentBPM = chartData.bpm;
         let currentBeat = chartData.beat;
-        const offset = chartData.offset || 0;
+        const offset = chartData.offset / 1000;
         let totalTime = 0;
 
-        for (let line of chartData.lines) {
+        for (let line of selectedChart.lines) {
             line = line.trim();
             if (!line) continue;
 
@@ -417,7 +538,13 @@ window.onload = async () => {
             const timePerChar = measureDuration / totalNotesInMeasure;
 
             chars.forEach((char, index) => {
-                const noteType = parseInt(char);
+                let noteType = parseInt(char);
+                if (laneCount === 2) {
+                    if (noteType === 1) noteType = 3;
+                    else if (noteType === 2) noteType = 2;
+                    else if (noteType === 3) noteType = 5;
+                }
+                
                 if (noteType >= 1 && noteType <= 6) {
                     parsedNotes.push({
                         type: noteType,
@@ -443,15 +570,18 @@ window.onload = async () => {
         }
         note.visible = true;
         note.anchor.set(0.5);
-        note.texture = noteTextures[`type${type}`];
+
+        if (laneCount === 3 && type >= 4) {
+            note.texture = noteTextures[`type${type}_3`];
+        } else {
+            note.texture = noteTextures[`type${type}`];
+        }
         note.type = type;
 
         if (type <= 3) {
             note.width = LANE_W;
-        } else if (type <= 5) {
-            note.width = LANE_W * 2;
-        } else if (type === 6) {
-            note.width = LANE_W * 3;
+        } else {
+            note.width = LANE_W * laneCount;
         }
 
         gameContainer.addChild(note);
@@ -460,7 +590,7 @@ window.onload = async () => {
     }
 
     // ========================================
-    // ゲームの処理
+    // ゲーム開始・入力処理
     // ========================================
     async function startGame() {
         if (!audioBuffer) return;
@@ -480,7 +610,7 @@ window.onload = async () => {
         isPlaying = true;
 
         window.addEventListener("keydown", (e) => {
-            const stage = KEY_MAP[e.code];
+            const stage = currentKeyMap[e.code];
             if (e.repeat) return;
 
             if (isPlaying) {
@@ -500,12 +630,18 @@ window.onload = async () => {
                     } else if (noteType > 0) {
                         judgeInput(noteType, inputTimestamp);
 
-                        if (noteType === 1) { pencilAnimation([1], -1, false) }
-                        else if (noteType === 2) { pencilAnimation([2], -1, false) }
-                        else if (noteType === 3) { pencilAnimation([3], -1, false) }
-                        else if (noteType === 4) { pencilAnimation([1, 2], 0, false) }
-                        else if (noteType === 5) { pencilAnimation([2, 3], 1, false) }
-                        else if (noteType === 6) { pencilAnimation([3, 1], 2, false) }
+                        if (laneCount === 2) {
+                            if (noteType === 3) { pencilAnimation([1], -1, false); }
+                            else if (noteType === 2) { pencilAnimation([2], -1, false); }
+                            else if (noteType === 5) { pencilAnimation([1, 2], 1, false); }
+                        } else {
+                            if (noteType === 1) { pencilAnimation([3], -1, false); }
+                            else if (noteType === 2) { pencilAnimation([2], -1, false); }
+                            else if (noteType === 3) { pencilAnimation([1], -1, false); }
+                            else if (noteType === 4) { pencilAnimation([2, 3], 0, false); }
+                            else if (noteType === 5) { pencilAnimation([1, 2], 1, false); }
+                            else if (noteType === 6) { pencilAnimation([1, 3], 2, false); }
+                        }
                     }
 
                     pressedStages = {};
@@ -516,17 +652,35 @@ window.onload = async () => {
     }
 
     function getNoteType(stages) {
-        if (stages[1] && stages[2] && stages[3]) return -1;
+        if (laneCount === 2) {
+            if (stages[2] && stages[3]) return 5; // 緑
+            if (stages[3]) return 3; // 青
+            if (stages[2]) return 2; // 黄
+            return 0;
+        } else {
+            if (stages[1] && stages[2] && stages[3]) return -1;
+            if (stages[1] && stages[2]) return 4; // 橙
+            if (stages[2] && stages[3]) return 5; // 緑
+            if (stages[3] && stages[1]) return 6; // 紫
+            if (stages[1]) return 1; // 赤
+            if (stages[2]) return 2; // 黄
+            if (stages[3]) return 3; // 青
+            return 0;
+        }
+    }
 
-        if (stages[1] && stages[2]) return 4;
-        if (stages[2] && stages[3]) return 5;
-        if (stages[3] && stages[1]) return 6;
-
-        if (stages[1]) return 1;
-        if (stages[2]) return 2;
-        if (stages[3]) return 3;
-
-        return 0;
+    function updateKeyMap() {
+        if (laneCount === 2) {
+            currentKeyMap = {
+                "KeyF": 3, "KeyJ": 2
+            }
+            textKari.text = "左:Fキー\n右:Jキー";
+        } else {
+            currentKeyMap = {
+                "KeyD": 3, "KeyF": 2, "KeyJ": 2, "KeyK": 1
+            }
+            textKari.text = "左:Dキー\n中央:F/Jキー\n右:Kキー";
+        }
     }
 
     // ========================================
@@ -536,14 +690,16 @@ window.onload = async () => {
         const currentTime = pressedTime - audioStartTime - JUDGE_OFFSET;
         let targetNote = null;
         let minDiff = Infinity;
+        let diffMs = 0;
         let targetIndex = -1;
 
         for (let i = 0; i < activeNotes.length; i++) {
             const note = activeNotes[i];
-            if (note.texture === noteTextures[`type${type}`]) {
+            if (note.type === type) {
                 const diff = currentTime - note.targetTime;
                 if (Math.abs(diff) < minDiff && Math.abs(diff * 1000) <= JUDGE_WIDTH.MISS) {
                     minDiff = Math.abs(diff);
+                    diffMs = diff * 1000;
                     targetNote = note;
                     targetIndex = i;
                 }
@@ -551,30 +707,31 @@ window.onload = async () => {
         }
 
         if (targetNote) {
-            executeJudgement(targetNote, targetIndex, minDiff * 1000);
+            executeJudgement(targetNote, targetIndex, diffMs);
         }
     }
 
     function executeJudgement(note, index, diffMs) {
+        const absDiffMs = Math.abs(diffMs);
         let judgement = "MISS";
         let color = "#ffffff";
-        if (diffMs <= JUDGE_WIDTH.PERFECT) {
+        if (absDiffMs <= JUDGE_WIDTH.PERFECT) {
             judgement = "PERFECT";
             color = grdPerfect;
             perfectCount++;
             createParticles(note.x, judgeLine, note.type, 4);
-        } else if (diffMs <= JUDGE_WIDTH.GOOD) {
+        } else if (absDiffMs <= JUDGE_WIDTH.GOOD) {
             judgement = "GOOD";
             color = grdGood;
             goodCount++;
             createParticles(note.x, judgeLine, note.type, 2);
-        } else if (diffMs <= JUDGE_WIDTH.MISS) {
+        } else if (absDiffMs <= JUDGE_WIDTH.MISS) {
             judgement = "MISS";
             color = grdMiss;
             missCount++;
         }
 
-        showJudgement(judgement, color);
+        showJudgement(judgement, color, diffMs);
         updateAccuracy();
 
         activeNotes.splice(index, 1);
@@ -582,10 +739,27 @@ window.onload = async () => {
         notePool.push(note);
     }
 
-    function showJudgement(judgement, color) {
+    function showJudgement(judgement, color, diffMs) {
         judgeText.text = judgement;
         judgeText.alpha = 1.0;
         judgeText.style.fill = color;
+        
+        if (isShowDiff) {
+            const rounded = Math.round(diffMs);
+            let text = "";
+            if (rounded > 0) {
+                text = `+${rounded}ms`;
+            } else if (rounded < 0) {
+                text = `${rounded}ms`;
+            } else {
+                text = `0ms`;
+            }
+            diffText.text = text;
+            diffText.alpha = 1.0;
+            diffText.style.fill = color;
+        } else {
+            diffText.text = "";
+        }
     }
 
     function updateAccuracy() {
@@ -611,11 +785,20 @@ window.onload = async () => {
             } else if (mixIndex >= 0) {
                 pencil.texture = pencilTextures.mix[mixIndex];
             } else {
-                pencil.texture = pencilTextures.normal[stages[i] - 1];
+                pencil.texture = pencilTextures.normal[pencil.defaultColorIndex];
+            }
+
+            if (isBlack) {
+                currentLaneColors[stages[i] - 1] = 0x666666;
+            } else if (mixIndex >= 0) {
+                currentLaneColors[stages[i] - 1] = mixLaneColors[mixIndex];
+            } else {
+                currentLaneColors[stages[i] - 1] = laneColors[stages[i] - 1];
             }
 
             pencil.offsetY = -20;
         }
+        drawLaneColors();
     }
 
     function createParticles(x, y, noteType, count) {
@@ -684,6 +867,26 @@ window.onload = async () => {
     }
 
     // ========================================
+    // 曲選択・ボタン処理
+    // ========================================
+    const songButtons = document.querySelectorAll(".song-btn");
+
+    function showGameScreen() {
+        document.getElementById("select-screen").classList.add("hidden");
+        document.getElementById("game-screen").classList.remove("hidden");
+    }
+
+    songButtons.forEach(button => {
+        button.addEventListener("click", async (e) => {
+            showGameScreen();
+            const chartPath = e.currentTarget.dataset.chart;
+            const diffKey = e.currentTarget.dataset.diff;
+            await loadStage(chartPath, diffKey);
+            startGame();
+        });
+    });
+
+    // ========================================
     // メインループ
     // ========================================
     app.ticker.add(() => {
@@ -724,8 +927,11 @@ window.onload = async () => {
                 if (judgeText.alpha < 0) {
                     judgeText.alpha = 0;
                 }
+                diffText.alpha = judgeText.alpha;
             }
         }
+
+        let laneNeedRedraw = false;
 
         for (let i = 0; i < pencils.length; i++) {
             const pencil = pencils[i];
@@ -733,11 +939,19 @@ window.onload = async () => {
                 pencil.offsetY += pencilRecoverSpeed;
                 if (pencil.offsetY > 0) {
                     pencil.offsetY = 0;
-                    pencil.texture = pencilTextures.normal[i];
+                    pencil.texture = pencilTextures.normal[pencil.defaultColorIndex];
+                    if (currentLaneColors[i] !== laneColors[i]) {
+                        currentLaneColors[i] = laneColors[i];
+                        laneNeedRedraw = true;
+                    }
                 }
             }
             pencil.y = pencil.baseY + pencil.offsetY;
             
+        }
+
+        if (laneNeedRedraw) {
+            drawLaneColors();
         }
 
         for (let i = activeParticles.length - 1; i >= 0; i--) {
@@ -760,8 +974,4 @@ window.onload = async () => {
             }
         }
     });
-
-    loadStage("assets/charts/01.json");
-
-    window.addEventListener('click', startGame, { once: true });
 };
